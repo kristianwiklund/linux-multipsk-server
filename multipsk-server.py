@@ -3,112 +3,111 @@ import ConfigParser
 import struct, fcntl, os
 import asyncore, socket
 import alsaaudio
-import threading2
 import time
-
-mbuffer = ""
-lock = threading2.Lock()
-connected = False
 
 # audio
 
-class audioloop(threading2.Thread):
-    def __init__(self):
-        threading2.Thread.__init__(self)
-#        print alsaaudio.cards()
-        self.inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL,config.get("Audio","card"))
-        self.inp.setchannels(1)
-        self.inp.setrate(11025)
-        self.inp.setformat(alsaaudio.PCM_FORMAT_U8)        
-        self.inp.setperiodsize(500)
-        print "Started audio listener"
-        self.fnopp = False
+def initaudio():
+    
+    inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL,config.get("Audio","card"))
+    inp.setchannels(1)
+    inp.setrate(11025)
+    inp.setformat(alsaaudio.PCM_FORMAT_U8)        
+    inp.setperiodsize(500)
+    
+    return inp
 
-    def run(self):
-        global mbuffer
-        global connected 
-
-        while True:
-            time.sleep(0.001) # scheduler
-            if connected:
-                if not self.fnopp: 
-                    print "Starting to send audio"
-                    self.fnopp = True
-
-                (l,data) = self.inp.read()
-#                print "(sound ) wait for lock..."
-                if len(mbuffer) < 65535:
-                    lock.acquire()                    
-                    mbuffer += data
-                #                print "(sound ) storing data... mbuffer="+str(len(mbuffer))
-                    lock.release()
-
-#                print "(sound ) done"
-#                else:
-#                    print "(sound ) mbuffer full - dumping data"
+def readaudio(inp):
+    d = inp.read()
+    return d
 
 
-# get and send data
+# # get and send data
 
-class Handler(asyncore.dispatcher):
-
-    def __init__(self,sock):
-        global connected
-        asyncore.dispatcher.__init__(self,sock)
-#        string = "\1\2\3F\0\1skdjfhkshdkjfkshkfhksdhfkskdfksdkfskdjhfksdhkfhksd"
-#	print ":".join("{:02x}".format(ord(c)) for c in string)
-#	#self.send(string)
-#	self.buffer = string
-        
+class Handler(asyncore.dispatcher_with_send):
+    
+    def __init__(self,sock,audio):
+        self.inp = audio
+        asyncore.dispatcher_with_send.__init__(self,sock)
+	self.buffer = ""
+        self.dumdata = True
+        self.oktosend = False
 
     def writable(self):
-        global mbuffer
+        if not self.oktosend:
+            return False
 
-        lock.acquire()
-        status = len(mbuffer)
-        lock.release()
-        if status>0:
-            print "(server) data to send"
+        (l,data) = readaudio(self.inp)
 
-        return (status > 0)
+        if l>0:
+#            print "(server) data to send"
+            self.buffer += data
+#            print str(l)+" new, "+str(len(self.buffer))+" total"
+            self.dumdata=True
+            return True
+        elif len(self.buffer)>0:
+            return True
+        else:
+            if self.dumdata:
+                print "kein data! Ja!"
+                print l
+                self.dumdata=False
+            return False
 
     def handle_write(self):
-        global mbuffer
-
-        print "(server) wait for lock..."
-        lock.acquire()
-#        print "(server) copy data..."
-        # cut up to 500 bytes from the buffer, then release
-        mtb = mbuffer[:500]
-        mbuffer = mbuffer[len(mtb):]
-#        print "(server) data copied..."
-        lock.release()        
-#        print "(server) lock released..."
-
-        while True:
-            sent = self.send("\1\2\3F\0\0")
-            sent = self.send(mtb)
-#            print "(server) sending "+str(sent)+" bytes of "+str(len(mtb) )
-            mtb = mtb[sent:]
-            time.sleep(0.01) # schedule
-            if len(mtb)<1:
-                break
-            
-        print "(server) done"
+        sent = self.sendall(self.buffer)
+        self.buffer=""
 
     def handle_read(self):
         self.data = self.recv(1024).strip()
-        print ":".join("{:02x}".format(ord(c)) for c in self.data)
+        # command mode:
 
+        while len(self.data)>0:
+            cmd = self.data[0:6]
+            self.data = self.data[6:]
+            # check that it is a command
+            hdr = cmd[0:3]
+            cmd = cmd[3:6]
+            cc = cmd[0]
 
+            if hdr == "\1\2\3":
+                print "Command "+cc+" received"
+                print ":".join("{:02x}".format(ord(c)) for c in cmd)
+                
+                if cc=="I": # callsign
+                    print "Callsign "+str(len(cmd))
+                    cl = ord(cmd[2])
+                    print "length "+str(cl)+" "+self.data
+                    s = self.data[0:cl]
+                    self.data=self.data[cl:]
+                    print s
+                elif cc=="F": # frame format
+                    if cmd[1] == "\0": # rx 11025
+                        inp.setrate(11025)
+                        inp.setperiodsize(500)
+                        print "rx bitrate 11025"
+                    elif cmd[1] == "\4":
+                        inp.setrate(48000)
+                        inp.setperiodsize(2200)
+                        print "rx bitrate 48000"
+
+                    if cmd[2] == "\1":
+                        print "tx bitrate 5512.5"
+                    elif cmd[2] == "\0":
+                        print "tx bitrate 11025"
+                elif cc == "V": # protocol version
+                    if cmd == "V02":
+                        print "protocol version 2"
+                        self.oktosend=True
 class Server(asyncore.dispatcher):
 
-    def __init__(self, host, port):
+    def __init__(self, host, port,audio):
         asyncore.dispatcher.__init__(self)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.set_reuse_addr()
         self.bind((host, port))
         self.listen(5)
+        self.inp = audio
 
     def handle_accept(self):
         global connected
@@ -116,16 +115,10 @@ class Server(asyncore.dispatcher):
         if pair is not None:
             sock, addr = pair
             print 'Incoming connection from %s' % repr(addr)
-            handler = Handler(sock)
+            handler = Handler(sock,self.inp)
             connected = True
 
-class serverloop(threading2.Thread):
-    def __init__(self):
-        threading2.Thread.__init__(self)
-        self.server = Server(config.get("Network","host"), int(config.get("Network","port")))
-        print "Started server listen: "+config.get("Network","host")+":"+config.get("Network","port")
-    def run(self):
-        asyncore.loop()
+
         
     
 
@@ -135,8 +128,11 @@ config.read('multipsk-server.cfg')
 config.add_section("Network")
 config.add_section("Audio")
 
-thread1 = audioloop()
-thread1.start()
+inp = initaudio()
 
-thread2 = serverloop()
-thread2.start()
+server = Server(config.get("Network","host"), int(config.get("Network","port")),inp)
+print "Started server listen: "+config.get("Network","host")+":"+config.get("Network","port")
+
+
+asyncore.loop()
+
