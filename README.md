@@ -14,3 +14,7 @@ Config file:
 Network/port: default 3020
 Network/host: where to listen, default 0.0.0.0
 Audio/card: default
+
+Screenshot of multipsk running towards the script:
+
+![waterfall](waterfall.png)
