@@ -6,3 +6,7 @@ Links:
 * Multipsk: http://f6cte.free.fr/
 * Protocol definition is found in this zip file: http://f6cte.free.fr/SPECIFICATIONS.ZIP
 
+Config file:
+
+Network/port: default 3020
+Network/host: where to listen, default 0.0.0.0
